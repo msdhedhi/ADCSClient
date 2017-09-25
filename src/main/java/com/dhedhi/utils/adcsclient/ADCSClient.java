@@ -1,6 +1,8 @@
 package com.dhedhi.utils.adcsclient;
 
 import java.io.ByteArrayInputStream;
+import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -9,9 +11,14 @@ import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.URI;
 import java.net.URL;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.security.Security;
+import java.security.cert.CertificateException;
 import java.security.cert.CertificateFactory;
 import java.security.cert.X509Certificate;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.UUID;
 
 import javax.net.ssl.HostnameVerifier;
@@ -42,6 +49,11 @@ public class ADCSClient {
     private final String adcsWebServiceURI; // this is typically of the form https://<server-name>/CES/service.svc/CES
     private final String sUsername;  // the username of the user for which the certificate will be issued.
     private final String sPassword;  // the password of the user for which the certificate will be issued.
+    private boolean verifyServerCerts = true; // should we verify the server certs on SSL/TLS connection.
+
+    private MessageDigest sha1; // used to compute issuer hashes
+
+    private Map<String,X509Certificate> caCerts = new HashMap<String,X509Certificate>();
     
     static {
         // Add bouncy castle as the security provider
@@ -53,21 +65,99 @@ public class ADCSClient {
         this.adcsWebServiceURI = sURI;
         this.sUsername = sUsername;
         this.sPassword = sPassword;
+        
+        try {
+            sha1 = MessageDigest.getInstance("SHA1"); // we should always find SHA1 provider
+        } catch (NoSuchAlgorithmException e) {
+        }
   
     }
     
+    // ------------------------------------------------------------------------------------------------
+    // Load the CAs from a folder. We will use these CAs to verify our connections to SSL servers
+    // ------------------------------------------------------------------------------------------------
+    public synchronized void loadCAStore( String sCAStorePath ) {
+        File caFilePath = new File(sCAStorePath);
+        
+        if( caFilePath.exists() == false ) {
+            throw new ADCSCertificateException("Directory: " + sCAStorePath + " does not exist." );
+        }
+        if( caFilePath.isDirectory() == false ) {
+            throw new ADCSCertificateException("Directory: " + sCAStorePath + " does not exist." );
+        }
+        
+        for (File fileEntry : caFilePath.listFiles()) {
+            InputStream in = null;
+            try {
+                in = new FileInputStream(sCAStorePath + "/" + fileEntry.getName());
+                CertificateFactory factory = CertificateFactory.getInstance("X.509");
+                X509Certificate anchorCert = (X509Certificate) factory.generateCertificate(in);
+                
+                // add this CA certificate to our caCerts map. Use the issuers subject hash for easy lookup.
+                sha1.reset();
+                sha1.update(anchorCert.getSubjectX500Principal().getEncoded());
+                String sIssuerHash = String.valueOf(convertBytesToHex(sha1.digest()));
+                caCerts.put(sIssuerHash , anchorCert);
+                
+            } catch( Exception e ) {
+                throw new ADCSCertificateException("Unable to read file: " + sCAStorePath + "/" + fileEntry.getName() );
+            } finally {
+                if (in != null) {
+                    try {
+                        in.close();
+                    } catch( IOException e ) {
+                        logger.error( "Unable to close file. Readon: " + e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+    
+    // ------------------------------------------------------------------------------------------------
+    // Signs a Certificate signing request using Windows Active Directory Certificte Service
+    // ------------------------------------------------------------------------------------------------
     public synchronized X509Certificate signCSR(String sCSR) {
         
-        // initialize socket factory if not already initialized.
-        // Right now, we are trusting all certificates. We should never do this in a production environment
         if( sc == null ) {
             X509TrustManager trustAllCerts = new X509TrustManager() {
                 public java.security.cert.X509Certificate[] getAcceptedIssuers() {
-                return null;
+                    return null;
                 }
+                
                 public void checkClientTrusted(X509Certificate[] certs, String authType) {
+                    // Not using client certs
                 }
-                public void checkServerTrusted(X509Certificate[] certs, String authType) {
+                public void checkServerTrusted(X509Certificate[] certs, String authType) throws CertificateException {
+                    
+                    // Never do this in production.
+                    if( verifyServerCerts == false ) {
+                        logger.warn( "You are trusting all certificates. Make sure you are not running in production.");
+                        return;
+                    }
+                    
+                    for( int i = 0; i < certs.length; i++ ) {
+                        
+                        // Compute the issuer's hash and then try to look it up in our caCerts hash map
+                        sha1.reset();
+                        sha1.update(certs[i].getIssuerX500Principal().getEncoded());
+                        String sIssuerHash = String.valueOf(convertBytesToHex(sha1.digest()));
+                        
+                        if( caCerts.containsKey(sIssuerHash ) == false ) {
+                            throw new CertificateException( "Server certificate with isuser hash: " + sIssuerHash + " and subject: " + certs[i].getIssuerX500Principal().getName() + " was not found in CA store.");
+                        }
+                        
+                        X509Certificate trustAnchor = caCerts.get(sIssuerHash);
+                        
+                        // Now verify this certificate as signed using the caCert we have identified
+                        try {
+                            certs[i].verify(trustAnchor.getPublicKey());
+                            logger.info( "Server certificate verified using CA: " + trustAnchor.getSubjectDN().getName());
+                        } catch (Exception e) {
+                            throw new CertificateException( "Unable to verify server certificate: " + certs[i].getSubjectDN().getName() + " using CA with hash: " + sIssuerHash);
+                        } 
+                        
+                        // Add more checks for CRL, OCSP and expiry
+                    }
                 }
             };   
             try {
@@ -113,7 +203,9 @@ public class ADCSClient {
     }
     
     
-    
+    // ------------------------------------------------------------------------------------------------
+    // Constructs a SOAP request and sends it to ADCS to sign the CSR
+    // ------------------------------------------------------------------------------------------------    
     private String doSoapMagic(String soapenvbody) {
 
         String sHostname;
@@ -258,7 +350,26 @@ public class ADCSClient {
             }
         }
     }
+
+    public boolean isVerifyServerCerts() {
+        return verifyServerCerts;
+    }
+
+    public void setVerifyServerCerts(boolean verifyServerCerts) {
+        this.verifyServerCerts = verifyServerCerts;
+    }
     
+    private static char hex[] = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
+
+    private char[] convertBytesToHex(byte[] bytes) {
+        char buf[] = new char[bytes.length * 2];
+        int index = 0;
+        for (byte b : bytes) {
+            buf[index++] = hex[(b >> 4) & 0xf];
+            buf[index++] = hex[b & 0xf];
+        }
+        return buf;
+    }
     
     
     

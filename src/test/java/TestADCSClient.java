@@ -35,7 +35,6 @@ public class TestADCSClient {
     @Test
     public void TestAllGood() throws IOException {
     	CertUtil certUtil = new CertUtil();
-    	
     	// Create a public/private key pair
     	KeyPair keyPair = null;
         try {
@@ -60,6 +59,7 @@ public class TestADCSClient {
         // Now Sign the CSR using ADCS web service
 		X509Certificate signedCertificate;
 		ADCSClient client = new ADCSClient("https://<server-name>/CES/service.svc/CES", "<username>", "<userpassword>");
+		client.loadCAStore(caStore); // load all the CAs we trust
 		try {
 		    signedCertificate = client.signCSR( sCSR );
 		}catch (Exception e) {
