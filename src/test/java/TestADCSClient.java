@@ -40,7 +40,7 @@ public class TestADCSClient {
         try {
             keyPair = certUtil.createPublicPrivateKeyPair();
         } catch (Exception e) {
-            e.printStackTrace();
+            LOGGER.error("Unable to create Public/private key pair");
             fail("Unable to create Public/private key pair");
             return;
         }
@@ -93,7 +93,7 @@ public class TestADCSClient {
             return;
         }
         
-        assert( publicKey.equals( keyPair.getPublic() ) == true );
+        org.junit.Assert.assertEquals( publicKey.equals( keyPair.getPublic() ), true );
 		
     }
     

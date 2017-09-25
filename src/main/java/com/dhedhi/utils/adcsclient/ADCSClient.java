@@ -114,7 +114,7 @@ public class ADCSClient {
     }
     
     // ------------------------------------------------------------------------------------------------
-    // Signs a Certificate signing request using Windows Active Directory Certificte Service
+    // Signs a Certificate signing request using Windows Active Directory Certificate Service
     // ------------------------------------------------------------------------------------------------
     public synchronized X509Certificate signCSR(String sCSR) {
         
